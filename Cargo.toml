@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/memento-core",
+    "crates/memento-audio",
+    "crates/memento-asr",
+    "crates/memento-diar",
+    "crates/memento-session",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/malte/memento"
+
+[workspace.dependencies]
+memento-core = { path = "crates/memento-core" }
+memento-audio = { path = "crates/memento-audio" }
+memento-asr = { path = "crates/memento-asr" }
+memento-diar = { path = "crates/memento-diar" }
+memento-session = { path = "crates/memento-session" }

@@ -1,0 +1,32 @@
+[package]
+name = "memento-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+memento-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# windows-core is a direct dependency because `#[implement]` expands to paths
+# rooted at `windows_core`, which the completion handler needs.
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Security",           # SECURITY_ATTRIBUTES, which gates CreateEventW
+    "Win32_System_Com",
+    # PROPVARIANT, which is how ActivateAudioInterfaceAsync takes its params.
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Variant",
+] }
+
+# Phase 0 of the plan: prove per-process WASAPI loopback before building on it.
+# Windows-only, and must be run on a real Windows machine — `cargo check
+# --target x86_64-pc-windows-msvc` from macOS type-checks it but cannot link.
+[[bin]]
+name = "loopback-spike"
+path = "src/bin/loopback_spike.rs"
+required-features = []

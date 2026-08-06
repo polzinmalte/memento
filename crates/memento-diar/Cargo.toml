@@ -1,0 +1,18 @@
+[package]
+name = "memento-diar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+memento-core.workspace = true
+memento-asr.workspace = true
+# `download-binaries` pulls prebuilt sherpa-onnx rather than compiling the C++
+# tree, which keeps a clean build in minutes rather than tens of minutes. No GPU
+# features: diarization runs once at the end of a session on CPU, like the ASR.
+sherpa-rs = { version = "0.6", default-features = false, features = ["download-binaries"] }
+ureq = "3"
+
+[[bin]]
+name = "diarize-file"
+path = "src/bin/diarize_file.rs"

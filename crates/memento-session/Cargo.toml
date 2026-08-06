@@ -1,0 +1,20 @@
+[package]
+name = "memento-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+memento-core.workspace = true
+memento-asr.workspace = true
+memento-diar.workspace = true
+# App-layer crate, so a date library is appropriate here; memento-core stays
+# dependency-free and takes its timestamps pre-formatted.
+chrono = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+memento-audio.workspace = true
+
+[[bin]]
+name = "run-session"
+path = "src/bin/run_session.rs"

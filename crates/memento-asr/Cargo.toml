@@ -1,0 +1,26 @@
+[package]
+name = "memento-asr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+memento-core.workspace = true
+# No GPU features: memento targets CPU inference, and building with Metal here
+# would make macOS benchmarks say nothing about the Windows machines it runs on.
+whisper-rs = "0.16"
+# Whisper's compression-ratio signal is defined against zlib, so the decode
+# thresholds ported from listnr only mean anything if it is computed the same way.
+#
+# The backend is not interchangeable here. flate2's default (miniz_oxide)
+# compresses short repetitive text markedly worse than zlib — 29 bytes where
+# zlib gets 17 — which *lowers* the measured ratio on exactly the degenerate
+# output the ceiling exists to catch, quietly making the gate too permissive.
+# zlib-rs reproduces reference zlib byte for byte and needs no C toolchain,
+# which keeps the Windows build simple. See `matches_reference_zlib`.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+ureq = "3"
+
+[[bin]]
+name = "transcribe-file"
+path = "src/bin/transcribe_file.rs"

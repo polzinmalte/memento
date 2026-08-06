@@ -1,0 +1,23 @@
+[package]
+name = "memento-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "memento_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+memento-core.workspace = true
+memento-asr.workspace = true
+memento-session.workspace = true
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+memento-audio.workspace = true

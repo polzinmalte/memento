@@ -1,0 +1,9 @@
+[package]
+name = "memento-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately dependency-free: this crate is pure logic and must build and test
+# on any host, including the macOS dev machine that cannot run the Windows lanes.
+[dependencies]

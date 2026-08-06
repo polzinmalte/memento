@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>memento</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1c1f26;
+    --line: #2b303a;
+    --text: #e6e8ec;
+    --muted: #949aa6;
+    --accent: #7aa2f7;
+    --you: #7aa2f7;
+    --others: #9ece6a;
+    --warn: #e0af68;
+    --danger: #f7768e;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f7f9; --panel: #ffffff; --line: #e2e5ea;
+      --text: #1b1e24; --muted: #666e7d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    padding: 14px 18px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 12px;
+  }
+  h1 { font-size: 15px; margin: 0; letter-spacing: .02em; }
+  .sub { color: var(--muted); font-size: 12px; }
+  main { flex: 1; display: flex; min-height: 0; }
+  .setup {
+    width: 300px; padding: 16px; border-right: 1px solid var(--line);
+    overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
+  }
+  .stage { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  select, input[type=number] {
+    width: 100%; padding: 7px 9px; background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; font: inherit;
+  }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row input[type=checkbox] { accent-color: var(--accent); }
+  button {
+    padding: 9px 14px; border-radius: 8px; border: 1px solid transparent;
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .primary { background: var(--accent); color: #10131a; }
+  .primary:disabled { opacity: .45; cursor: not-allowed; }
+  .stop { background: var(--danger); color: #10131a; }
+  .meters { padding: 12px 18px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+  .meter { display: grid; grid-template-columns: 58px 1fr; gap: 10px; align-items: center; }
+  .meter span { font-size: 12px; color: var(--muted); }
+  .bar { height: 7px; background: var(--line); border-radius: 99px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0%; border-radius: 99px; transition: width .08s linear; }
+  .bar.you > i { background: var(--you); }
+  .bar.others > i { background: var(--others); }
+  .transcript { flex: 1; overflow-y: auto; padding: 14px 18px; }
+  .entry { display: grid; grid-template-columns: 52px 96px 1fr; gap: 10px; padding: 4px 0; }
+  .entry .clock { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .entry .who { font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+  .entry.you .who { color: var(--you); }
+  .entry.other .who { color: var(--others); }
+  .status {
+    padding: 9px 18px; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 12px; min-height: 36px;
+  }
+  .status.warn { color: var(--warn); }
+  .status.err { color: var(--danger); }
+  .empty { color: var(--muted); padding: 28px 0; text-align: center; }
+  .note {
+    background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn);
+    border-radius: var(--radius); padding: 10px 12px; font-size: 12px; color: var(--muted);
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>memento</h1>
+    <span class="sub">local meeting transcriber — nothing leaves this machine, nothing joins the call</span>
+  </header>
+
+  <main>
+    <section class="setup">
+      <div>
+        <label for="source">Capture from</label>
+        <select id="source"></select>
+      </div>
+      <div>
+        <label for="language">Language</label>
+        <select id="language">
+          <option value="de" selected>German</option>
+          <option value="en">English</option>
+          <option value="auto">Detect</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+        </select>
+      </div>
+      <div>
+        <label for="model">Model</label>
+        <select id="model"></select>
+        <div class="sub" id="model-note" style="margin-top:5px"></div>
+      </div>
+      <div>
+        <label for="sensitivity">Mic sensitivity</label>
+        <select id="sensitivity">
+          <option value="normal" selected>Normal</option>
+          <option value="high">High — quiet mic, hears more</option>
+          <option value="low">Low — noisy room, hears less</option>
+        </select>
+      </div>
+      <div>
+        <label for="speakers">Remote speakers (blank = detect)</label>
+        <input id="speakers" type="number" min="1" max="10" placeholder="detect" />
+      </div>
+      <div class="row">
+        <input id="diarize" type="checkbox" checked />
+        <label for="diarize" style="margin:0">Separate remote speakers after the call</label>
+      </div>
+      <button id="start" class="primary">Start</button>
+      <button id="stop" class="stop" hidden>Stop and save</button>
+      <div class="note" id="platform-note" hidden></div>
+    </section>
+
+    <section class="stage">
+      <div class="meters">
+        <div class="meter"><span>You</span><div class="bar you"><i id="level-you"></i></div></div>
+        <div class="meter"><span>Others</span><div class="bar others"><i id="level-others"></i></div></div>
+      </div>
+      <div class="transcript" id="transcript">
+        <div class="empty" id="empty">Nothing yet. Start a session to see the transcript build up here.</div>
+      </div>
+      <div class="status" id="status"></div>
+    </section>
+  </main>
+
+<script type="module">
+const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
+
+const $ = (id) => document.getElementById(id);
+const status = (text, cls = "") => { $("status").textContent = text; $("status").className = "status " + cls; };
+
+let models = [];
+
+async function init() {
+  const supported = await invoke("is_capture_supported");
+  models = await invoke("list_models");
+  renderModels();
+  await refreshSources(supported);
+
+  if (!supported) {
+    $("platform-note").hidden = false;
+    $("platform-note").textContent =
+      "Audio capture needs Windows. This build can still show the interface, but Start will refuse rather than record silence.";
+  }
+  $("language").addEventListener("change", syncDefaultModel);
+  await syncDefaultModel();
+}
+
+function renderModels() {
+  $("model").innerHTML = models
+    .map((m) => `<option value="${m.id}">${m.id} — ${m.sizeMb} MB</option>`)
+    .join("");
+  $("model").addEventListener("change", showModelNote);
+}
+
+function showModelNote() {
+  const m = models.find((m) => m.id === $("model").value);
+  $("model-note").textContent = m ? m.note : "";
+}
+
+async function syncDefaultModel() {
+  const id = await invoke("default_model_for", { language: $("language").value });
+  $("model").value = id;
+  showModelNote();
+}
+
+async function refreshSources(supported) {
+  const sources = await invoke("list_sources");
+  const options = sources.map((s) => `<option value="${s.pid}">${s.label} — ${s.detail}</option>`);
+  // Whole-device capture is the fallback when nothing is playing yet, or when
+  // per-process capture is unavailable.
+  options.push(`<option value="">Everything playing on this device</option>`);
+  $("source").innerHTML = options.join("");
+  if (supported && sources.length === 0) {
+    status("Nothing is playing audio yet — start your meeting, then reopen this list.");
+  }
+}
+
+$("start").addEventListener("click", async () => {
+  const pidValue = $("source").value;
+  const speakers = $("speakers").value;
+  $("transcript").innerHTML = "";
+  $("empty")?.remove();
+  try {
+    await invoke("start_session", {
+      request: {
+        pid: pidValue === "" ? null : Number(pidValue),
+        language: $("language").value,
+        model_id: $("model").value,
+        sensitivity: $("sensitivity").value,
+        speakers: speakers === "" ? null : Number(speakers),
+        diarize: $("diarize").checked,
+        output_dir: null,
+      },
+    });
+    $("start").hidden = true;
+    $("stop").hidden = false;
+  } catch (e) {
+    status(String(e), "err");
+  }
+});
+
+$("stop").addEventListener("click", async () => {
+  try {
+    await invoke("stop_session");
+    status("Finishing — transcribing the tail and separating speakers…");
+  } catch (e) {
+    status(String(e), "err");
+  }
+});
+
+function addLine(ev) {
+  const el = document.createElement("div");
+  el.className = "entry " + (ev.speaker === "You" ? "you" : "other");
+  el.innerHTML =
+    `<div class="clock">${ev.clock}</div><div class="who"></div><div class="text"></div>`;
+  // textContent, not innerHTML: transcript text is arbitrary speech.
+  el.querySelector(".who").textContent = ev.speaker;
+  el.querySelector(".text").textContent = ev.text;
+  $("transcript").append(el);
+  $("transcript").scrollTop = $("transcript").scrollHeight;
+}
+
+function setLevel(lane, rms) {
+  // RMS is tiny for speech; a square-root curve makes the meter readable
+  // instead of a bar that barely twitches.
+  const pct = Math.min(100, Math.sqrt(rms) * 320);
+  $(lane === "you" ? "level-you" : "level-others").style.width = pct + "%";
+}
+
+function finished(ev) {
+  $("start").hidden = false;
+  $("stop").hidden = true;
+  setLevel("you", 0);
+  setLevel("others", 0);
+  status(`Saved ${ev.lines} line(s) to ${ev.path}`);
+}
+
+listen("session", ({ payload: ev }) => {
+  switch (ev.kind) {
+    case "preparing":  status("Preparing — " + ev.message); break;
+    case "download":
+      status(ev.total ? `Downloading model — ${Math.floor((ev.done / ev.total) * 100)}%`
+                      : "Downloading model…");
+      break;
+    case "started":    status("Listening."); break;
+    case "line":       addLine(ev); break;
+    case "level":      setLevel(ev.lane, ev.rms); break;
+    case "warning":    status(ev.message, "warn"); break;
+    case "finalizing": status(ev.message); break;
+    case "finished":   finished(ev); break;
+    case "error":
+      status(ev.message, "err");
+      $("start").hidden = false;
+      $("stop").hidden = true;
+      break;
+  }
+});
+
+init().catch((e) => status(String(e), "err"));
+</script>
+</body>
+</html>
