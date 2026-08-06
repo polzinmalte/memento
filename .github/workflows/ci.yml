@@ -67,6 +67,9 @@ jobs:
       - name: Test report
         if: always()
         run: |
+          # SC2016: the sed scripts below use single quotes on purpose — the
+          # \1 backreferences must reach sed unexpanded by the shell.
+          # shellcheck disable=SC2016
           count() { grep -c "$1" /tmp/cargo-test.log || true; }
           passed=$(count ' \.\.\. ok$')
           failed=$(count ' \.\.\. FAILED$')
