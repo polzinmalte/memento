@@ -99,13 +99,15 @@ jobs:
       # the repository — sherpa-rs-sys downloads them — so they are built first
       # and staged into the directory the config points at.
       #
-      # Building here rather than leaving it to tauri-action is what makes the
-      # DLLs exist in time; the action's own build then has nothing left to do.
-      - name: Build, and stage the DLLs the installer has to carry
+      # memento-diar rather than the app: `tauri-build` resolves the resource
+      # glob while compiling memento-app and fails when it matches nothing, so
+      # the app cannot be what produces the DLLs it needs. Building the crate
+      # that pulls sherpa in runs the build script that downloads them.
+      - name: Stage the DLLs the installer has to carry
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release -p memento-app
+          cargo build --release -p memento-diar
           python3 scripts/stage_native_libs.py
 
       - name: Build and release

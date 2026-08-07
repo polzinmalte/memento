@@ -62,23 +62,25 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      # sherpa-onnx is used as a *shared* library, so its DLLs have to sit next
-      # to the test executables in `target/debug/deps`. Putting them there is a
-      # side effect of the sherpa-rs-sys build script, and neither half of that
-      # survives caching: rust-cache prunes loose files from `target/debug`, and
-      # the build script is fingerprint-fresh on a restore so it never re-runs
-      # to put them back. The tests then die before `main` with
-      # `STATUS_DLL_NOT_FOUND` (exit code 0xc0000135).
+      # sherpa-onnx is used as a *shared* library, and its DLLs have to be in
+      # two places before anything else here can run:
       #
-      # The download cache the DLLs come from is cached (see above), so copying
-      # them across is enough — and it is a no-op on a cold build, where the
-      # build script already did it.
-      - name: Put the sherpa-onnx DLLs next to the test binaries
+      #   - beside the test executables in `target/debug/deps`, or the tests die
+      #     before `main` with `STATUS_DLL_NOT_FOUND` (exit code 0xc0000135);
+      #   - in `src-tauri/bundled`, because `tauri-build` resolves the bundle's
+      #     resource glob while *compiling* memento-app and fails when it
+      #     matches nothing — so this has to precede even the lint.
+      #
+      # Putting them anywhere is a side effect of the sherpa-rs-sys build
+      # script, and neither half survives caching: rust-cache prunes loose files
+      # from `target/debug`, and the build script is fingerprint-fresh on a
+      # restore so it never re-runs to put them back. Hence the explicit build
+      # of a crate that pulls sherpa in — a cold cache needs it to download them
+      # at all — followed by copying from the download cache, which is cached.
+      - name: Native libraries, before anything that needs them
         run: |
           set -euo pipefail
+          cargo build -p memento-diar
           mkdir -p target/debug/deps
           count=0
           while IFS= read -r dll; do
@@ -86,11 +88,14 @@ jobs:
             cp -f "$dll" target/debug/deps/
             count=$((count + 1))
           done < <(find "$HOME/AppData/Local/sherpa-rs" -name '*.dll' 2>/dev/null || true)
-          if [ "$count" -eq 0 ]; then
-            echo "::warning::no sherpa-onnx DLLs found — diarization tests may fail to start"
-          else
-            echo "copied $count DLL(s) into target/debug and target/debug/deps"
-          fi
+          echo "copied $count DLL(s) into target/debug and target/debug/deps"
+          # The staging release.yml depends on. Running it here too means it is
+          # exercised on every push rather than for the first time while cutting
+          # a release, where its failure mode is an app that will not start.
+          PROFILE=debug python3 scripts/stage_native_libs.py
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # `--no-fail-fast` so one failing crate doesn't hide the rest, and the
       # output is kept for the report below.
@@ -98,12 +103,6 @@ jobs:
         run: |
           set -o pipefail
           cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/cargo-test.log
-
-      # The installer is only built on a tag, so without this the staging step
-      # release.yml depends on would be exercised for the first time while
-      # cutting a release — and its failure mode is an app that will not start.
-      - name: The installer's DLL staging still works
-        run: PROFILE=debug python3 scripts/stage_native_libs.py
 
       # cargo has no run summary of its own, so the test lines become one here.
       # Runs even when the tests failed — that is when the list is worth most.

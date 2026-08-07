@@ -379,7 +379,15 @@ mod tests {
     /// anything memento could report — so the declaration is checked here.
     #[test]
     fn the_installer_is_told_to_carry_the_native_libraries() {
-        let resources = config()["bundle"]["resources"]
+        // In the Windows overlay rather than the shared config: `tauri-build`
+        // resolves the glob at compile time and fails when it matches nothing,
+        // which would make the workspace unbuildable on a machine that has no
+        // DLLs to stage — every development machine that is not Windows.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.windows.conf.json");
+        let windows_config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+
+        let resources = windows_config["bundle"]["resources"]
             .as_object()
             .expect("bundle.resources must be a source -> destination map");
 
