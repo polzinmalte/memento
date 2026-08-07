@@ -38,6 +38,10 @@ jobs:
         with:
           # Same key as ci.yml so both share one cache.
           workspaces: ". -> target"
+          # See ci.yml: sherpa-rs-sys' downloaded libs live outside `target` and
+          # the cached build script output points at them by absolute path.
+          cache-directories: ~/AppData/Local/sherpa-rs
+          key: sherpa-cache-v2
 
       # The bundle filenames and the version shown in the installer come from
       # tauri.conf.json and Cargo.toml, not from the git tag. Stamp both from
