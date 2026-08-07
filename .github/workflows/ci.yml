@@ -65,6 +65,33 @@ jobs:
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # sherpa-onnx is used as a *shared* library, so its DLLs have to sit next
+      # to the test executables in `target/debug/deps`. Putting them there is a
+      # side effect of the sherpa-rs-sys build script, and neither half of that
+      # survives caching: rust-cache prunes loose files from `target/debug`, and
+      # the build script is fingerprint-fresh on a restore so it never re-runs
+      # to put them back. The tests then die before `main` with
+      # `STATUS_DLL_NOT_FOUND` (exit code 0xc0000135).
+      #
+      # The download cache the DLLs come from is cached (see above), so copying
+      # them across is enough — and it is a no-op on a cold build, where the
+      # build script already did it.
+      - name: Put the sherpa-onnx DLLs next to the test binaries
+        run: |
+          set -euo pipefail
+          mkdir -p target/debug/deps
+          count=0
+          while IFS= read -r dll; do
+            cp -f "$dll" target/debug/
+            cp -f "$dll" target/debug/deps/
+            count=$((count + 1))
+          done < <(find "$HOME/AppData/Local/sherpa-rs" -name '*.dll' 2>/dev/null || true)
+          if [ "$count" -eq 0 ]; then
+            echo "::warning::no sherpa-onnx DLLs found — diarization tests may fail to start"
+          else
+            echo "copied $count DLL(s) into target/debug and target/debug/deps"
+          fi
+
       # `--no-fail-fast` so one failing crate doesn't hide the rest, and the
       # output is kept for the report below.
       - name: Test
