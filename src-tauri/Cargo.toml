@@ -6,7 +6,17 @@ license.workspace = true
 
 [lib]
 name = "memento_app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# `rlib` only. Tauri's template also lists `staticlib` and `cdylib`, which exist
+# solely so the app can be linked into an iOS or Android host — memento is a
+# Windows desktop app and never needs either.
+#
+# They are not free: an rlib is not linked at all, whereas building a cdylib
+# forces every native dependency to resolve at link time. That is what broke the
+# Windows build, with sherpa-onnx's prebuilt *shared* distribution reporting a
+# `cargs` library it does not actually ship a `cargs.lib` for:
+#
+#   LINK : fatal error LNK1181: cannot open input file 'cargs.lib'
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
