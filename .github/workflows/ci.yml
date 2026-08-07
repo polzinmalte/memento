@@ -99,6 +99,12 @@ jobs:
           set -o pipefail
           cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/cargo-test.log
 
+      # The installer is only built on a tag, so without this the staging step
+      # release.yml depends on would be exercised for the first time while
+      # cutting a release — and its failure mode is an app that will not start.
+      - name: The installer's DLL staging still works
+        run: PROFILE=debug python3 scripts/stage_native_libs.py
+
       # cargo has no run summary of its own, so the test lines become one here.
       # Runs even when the tests failed — that is when the list is worth most.
       - name: Test report

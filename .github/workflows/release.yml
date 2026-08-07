@@ -93,6 +93,21 @@ jobs:
             echo "NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # sherpa-onnx is linked as a shared library, so its DLLs have to ship
+      # beside the executable or Windows refuses to start the process at all.
+      # Tauri bundles only what `bundle.resources` names, and these are not in
+      # the repository — sherpa-rs-sys downloads them — so they are built first
+      # and staged into the directory the config points at.
+      #
+      # Building here rather than leaving it to tauri-action is what makes the
+      # DLLs exist in time; the action's own build then has nothing left to do.
+      - name: Build, and stage the DLLs the installer has to carry
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p memento-app
+          python3 scripts/stage_native_libs.py
+
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:

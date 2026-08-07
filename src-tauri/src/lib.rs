@@ -372,6 +372,36 @@ mod tests {
         assert_eq!(config()["app"]["withGlobalTauri"], serde_json::json!(true));
     }
 
+    /// sherpa-onnx is linked as a shared library, so `sherpa-onnx-c-api.dll`
+    /// and the DLLs it imports have to be installed beside the executable.
+    /// Nothing in a compile or a test run notices their absence — the app is
+    /// killed by the loader before `main`, with a Windows dialog rather than
+    /// anything memento could report — so the declaration is checked here.
+    #[test]
+    fn the_installer_is_told_to_carry_the_native_libraries() {
+        let resources = config()["bundle"]["resources"]
+            .as_object()
+            .expect("bundle.resources must be a source -> destination map");
+
+        let staged = resources
+            .iter()
+            .find(|(source, _)| source.contains("bundled/"))
+            .expect("the staged DLL directory must be bundled");
+        assert_eq!(
+            staged.1, "",
+            "the DLLs must land beside the executable, which is where the loader looks"
+        );
+
+        // The staging script is the other half: it is what puts anything in
+        // that directory, and a glob that matches nothing fails the bundle.
+        let script = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../scripts/stage_native_libs.py"
+        ))
+        .unwrap();
+        assert!(script.contains("sherpa-onnx-c-api.dll"), "{script}");
+    }
+
     /// The transcript arrives as `session` events, and `listen` is a *core
     /// plugin* command — unlike memento's own commands it is refused unless a
     /// capability grants it. With no `capabilities/` directory at all the ACL is
