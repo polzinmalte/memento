@@ -24,6 +24,7 @@ use memento_diar::{SherpaDiarizer, models as diar_models};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 pub use source::{CaptureSource, FileSource, Lane, ThreadedSource, WarningSink};
 
@@ -36,6 +37,24 @@ pub const YOU: &str = "You";
 pub const OTHERS: &str = "Others";
 
 pub const SAMPLE_RATE: u32 = 16_000;
+
+/// How often a lane's level reaches the UI.
+///
+/// Capture delivers a buffer about every 10 ms, and emitting one event per
+/// buffer put roughly two hundred a second — both lanes — through the webview's
+/// IPC. That is far more than a meter can show, and enough that the interface
+/// falls behind and stays behind, so the status line that says what the session
+/// is doing arrives minutes late or not at all.
+const LEVEL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// True when this lane's meter is due an update, marking it sent.
+fn due(last: &mut Option<Instant>) -> bool {
+    if last.is_none_or(|t| t.elapsed() >= LEVEL_INTERVAL) {
+        *last = Some(Instant::now());
+        return true;
+    }
+    false
+}
 
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
@@ -202,23 +221,29 @@ pub fn run_session(
 
     let mut mic_done = false;
     let mut system_done = false;
+    let mut you_level_at: Option<Instant> = None;
+    let mut others_level_at: Option<Instant> = None;
     while !stop.is_stopped() && !(mic_done && system_done) {
         match mic.next_chunk()? {
             Some(chunk) => {
-                events(SessionEvent::Level {
-                    lane: Lane::You,
-                    rms: audio_math::rms(&chunk),
-                });
+                if due(&mut you_level_at) {
+                    events(SessionEvent::Level {
+                        lane: Lane::You,
+                        rms: audio_math::rms(&chunk),
+                    });
+                }
                 lane_a.push(chunk);
             }
             None => mic_done = true,
         }
         match system.next_chunk()? {
             Some(chunk) => {
-                events(SessionEvent::Level {
-                    lane: Lane::Others,
-                    rms: audio_math::rms(&chunk),
-                });
+                if due(&mut others_level_at) {
+                    events(SessionEvent::Level {
+                        lane: Lane::Others,
+                        rms: audio_math::rms(&chunk),
+                    });
+                }
                 recorder.write(&chunk)?;
                 lane_b.push(chunk);
             }
@@ -230,8 +255,16 @@ pub fn run_session(
     system.stop();
 
     // --- drain ------------------------------------------------------------
-    events(SessionEvent::Finalizing("transcribing the tail".into()));
+    // Per lane, so a session that stops responding here says which one it is
+    // waiting on. Draining means transcribing everything still queued, which
+    // on a slow machine is a real wait rather than a formality.
+    events(SessionEvent::Finalizing(
+        "transcribing the tail (you)".into(),
+    ));
     let you_lines = lane_a.finish();
+    events(SessionEvent::Finalizing(
+        "transcribing the tail (others)".into(),
+    ));
     let live_others_lines = lane_b.finish();
     for report in [lane_a.drop_report(), lane_b.drop_report()]
         .into_iter()

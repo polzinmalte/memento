@@ -40,12 +40,13 @@ pub trait CaptureSource: Send {
 /// has to say.
 pub type ChunkSender = Sender<Result<Vec<f32>, String>>;
 
-/// Ends a running capture and waits for its thread.
-type Stopper = Box<dyn FnOnce() + Send>;
+/// Ends a running capture, waiting no longer than the given deadline for its
+/// thread to unwind.
+pub type Stopper = Box<dyn FnOnce(Duration) + Send>;
 
 /// Starts a capture, handing it the sender to feed. Called once, by
 /// [`ThreadedSource::start`].
-type Starter = Box<dyn FnOnce(ChunkSender) -> Result<Stopper, Error> + Send>;
+pub type Starter = Box<dyn FnOnce(ChunkSender) -> Result<Stopper, Error> + Send>;
 
 /// Told about a lane that died mid-session, so the UI can say so.
 pub type WarningSink = Arc<dyn Fn(String) + Send + Sync>;
@@ -53,6 +54,20 @@ pub type WarningSink = Arc<dyn Fn(String) + Send + Sync>;
 /// How long [`ThreadedSource::start`] waits for the first buffer before
 /// deciding the lane cannot be placed on the shared timeline.
 const ANCHOR_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long a running lane may deliver nothing before it is treated as dead.
+///
+/// Capture delivers about every 10 ms — a device that has stopped rendering
+/// still produces silence — so a gap this long is a broken lane, not a quiet
+/// one. Waiting forever instead is worse than it sounds: the session pulls the
+/// two lanes in turn on one thread, so a lane that never answers also stops the
+/// session noticing that the user pressed Stop.
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long [`ThreadedSource::stop`] waits for the capture thread to unwind
+/// before leaving it to finish on its own. The session has a transcript to
+/// write; it must not be held up by a device driver that will not let go.
+const STOP_DEADLINE: Duration = Duration::from_secs(2);
 
 /// A [`CaptureSource`] fed by a capture thread.
 ///
@@ -71,6 +86,8 @@ pub struct ThreadedSource {
     pending: Option<Vec<f32>>,
     warning: Option<WarningSink>,
     anchor_timeout: Duration,
+    inactivity_timeout: Duration,
+    stop_deadline: Duration,
 }
 
 impl ThreadedSource {
@@ -82,6 +99,8 @@ impl ThreadedSource {
             pending: None,
             warning: None,
             anchor_timeout: ANCHOR_TIMEOUT,
+            inactivity_timeout: INACTIVITY_TIMEOUT,
+            stop_deadline: STOP_DEADLINE,
         }
     }
 
@@ -96,6 +115,25 @@ impl ThreadedSource {
     pub fn with_anchor_timeout(mut self, timeout: Duration) -> Self {
         self.anchor_timeout = timeout;
         self
+    }
+
+    /// Shortens how long a silent lane is tolerated. For tests — an untestable
+    /// timeout is how a hang ships.
+    pub fn with_inactivity_timeout(mut self, timeout: Duration) -> Self {
+        self.inactivity_timeout = timeout;
+        self
+    }
+
+    /// Shortens the wait for the capture thread to unwind. For tests.
+    pub fn with_stop_deadline(mut self, deadline: Duration) -> Self {
+        self.stop_deadline = deadline;
+        self
+    }
+
+    fn warn(&self, message: String) {
+        if let Some(sink) = &self.warning {
+            sink(message);
+        }
     }
 }
 
@@ -117,7 +155,7 @@ impl CaptureSource for ThreadedSource {
             // so this is worth failing the session for — the user needs to know
             // why Start did nothing.
             Ok(Err(e)) => {
-                stopper();
+                stopper(self.stop_deadline);
                 return Err(e.into());
             }
             // Silence so far, or a lane that finished immediately. Neither is an
@@ -138,14 +176,21 @@ impl CaptureSource for ThreadedSource {
         let Some(chunks) = &self.chunks else {
             return Ok(None);
         };
-        match chunks.recv() {
+        let outcome = chunks.recv_timeout(self.inactivity_timeout);
+        match outcome {
             Ok(Ok(samples)) => Ok(Some(samples)),
             // The lane ends, the session does not. A microphone unplugged forty
             // minutes in must not cost the forty minutes.
             Ok(Err(e)) => {
-                if let Some(warn) = &self.warning {
-                    warn(e);
-                }
+                self.warn(e);
+                Ok(None)
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.warn(format!(
+                    "a capture device stopped delivering audio for {} s and was dropped; \
+                     the transcript keeps everything recorded up to then",
+                    self.inactivity_timeout.as_secs()
+                ));
                 Ok(None)
             }
             Err(_) => Ok(None),
@@ -154,7 +199,7 @@ impl CaptureSource for ThreadedSource {
 
     fn stop(&mut self) {
         if let Some(stopper) = self.stopper.take() {
-            stopper();
+            stopper(self.stop_deadline);
         }
         self.chunks = None;
         // Including the buffer `start` was holding: a stopped source is
@@ -241,6 +286,7 @@ impl CaptureSource for FileSource {
 mod tests {
     use super::*;
     use memento_core::testing::{silence, tone};
+    use std::time::Instant;
 
     #[test]
     fn a_file_source_delivers_every_sample_once() {
@@ -296,12 +342,13 @@ mod tests {
                     }
                 }
             });
-            Ok(Box::new(move || {
+            Ok(Box::new(move |_deadline: Duration| {
                 stopped.store(true, std::sync::atomic::Ordering::Relaxed);
                 let _ = thread.join();
-            }) as Box<dyn FnOnce() + Send>)
+            }) as Stopper)
         }))
         .with_anchor_timeout(Duration::from_millis(250))
+        .with_inactivity_timeout(Duration::from_millis(250))
     }
 
     fn flag() -> Arc<std::sync::atomic::AtomicBool> {
@@ -365,6 +412,68 @@ mod tests {
         assert_eq!(source.next_chunk().unwrap(), Some(vec![0.2]));
         assert_eq!(source.next_chunk().unwrap(), None, "the lane ends");
         assert_eq!(warnings.lock().unwrap().as_slice(), ["device removed"]);
+    }
+
+    /// The session pulls both lanes in turn on one thread, so a lane that never
+    /// answers does not just lose its own audio — it stops the session noticing
+    /// that Stop was pressed, and the meeting is never written out at all.
+    #[test]
+    fn a_lane_that_goes_quiet_ends_instead_of_wedging_the_session() {
+        let warnings: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = Arc::clone(&warnings);
+
+        // Sends one buffer, then never speaks again — a device that stopped
+        // rendering without saying so.
+        let mut source = ThreadedSource::new(Box::new(|tx: ChunkSender| {
+            std::thread::spawn(move || {
+                let _ = tx.send(Ok(vec![0.1]));
+                std::thread::sleep(Duration::from_secs(30));
+            });
+            Ok(Box::new(|_deadline: Duration| {}) as Stopper)
+        }))
+        .with_anchor_timeout(Duration::from_millis(250))
+        .with_inactivity_timeout(Duration::from_millis(150))
+        .on_warning(Arc::new(move |w| collected.lock().unwrap().push(w)));
+
+        source.start().unwrap();
+        assert_eq!(source.next_chunk().unwrap(), Some(vec![0.1]));
+
+        let waited = Instant::now();
+        assert_eq!(source.next_chunk().unwrap(), None, "the lane must give up");
+        assert!(
+            waited.elapsed() < Duration::from_secs(5),
+            "and give up quickly"
+        );
+        assert!(
+            warnings.lock().unwrap()[0].contains("stopped delivering"),
+            "{:?}",
+            warnings.lock().unwrap()
+        );
+    }
+
+    /// Same reasoning one step later: the transcript is written after the
+    /// captures are told to stop, so a driver that will not let go must not be
+    /// able to hold the finished meeting hostage.
+    #[test]
+    fn stopping_gives_up_on_a_capture_that_will_not_unwind() {
+        let mut source = ThreadedSource::new(Box::new(|tx: ChunkSender| {
+            std::thread::spawn(move || {
+                let _ = tx.send(Ok(vec![0.1]));
+                std::thread::sleep(Duration::from_secs(30));
+            });
+            Ok(Box::new(|deadline: Duration| std::thread::sleep(deadline)) as Stopper)
+        }))
+        .with_anchor_timeout(Duration::from_millis(250))
+        .with_stop_deadline(Duration::from_millis(100));
+
+        source.start().unwrap();
+        let waited = Instant::now();
+        source.stop();
+        assert!(
+            waited.elapsed() < Duration::from_secs(5),
+            "must not block on it"
+        );
     }
 
     #[test]

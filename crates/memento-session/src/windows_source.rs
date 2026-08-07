@@ -10,12 +10,12 @@
 #![cfg(windows)]
 
 use crate::SAMPLE_RATE;
-use crate::source::{ChunkSender, Error, ThreadedSource};
+use crate::source::{ChunkSender, Error, Stopper, ThreadedSource};
 use memento_audio::{
     CAPTURE_CHANNELS, CAPTURE_SAMPLE_RATE, Decimator, DeviceLoopbackCapture, MicCapture,
     ProcessLoopbackCapture, downmix_to_mono,
 };
-use std::thread::JoinHandle;
+use std::time::Duration;
 
 /// Lane A. Whatever Windows calls the default input device.
 pub fn microphone() -> ThreadedSource {
@@ -24,15 +24,15 @@ pub fn microphone() -> ThreadedSource {
         let worker = capture.clone();
         // MicCapture already downmixes and resamples, because it is the one
         // capture whose device format is negotiable.
-        let thread = std::thread::spawn(move || {
-            let result = worker.run(None, |chunk| {
-                let _ = chunks.send(Ok(chunk.samples));
-            });
-            if let Err(e) = result {
-                let _ = chunks.send(Err(e.to_string()));
-            }
-        });
-        Ok(stopper(move || capture.stop(), thread))
+        Ok(spawn(
+            chunks,
+            move || capture.stop(),
+            move |chunks: &ChunkSender| {
+                worker.run(None, |chunk| {
+                    let _ = chunks.send(Ok(chunk.samples));
+                })
+            },
+        ))
     }))
 }
 
@@ -52,19 +52,19 @@ pub fn application(pid: u32) -> ThreadedSource {
 
         let capture = ProcessLoopbackCapture::new();
         let worker = capture.clone();
-        let thread = std::thread::spawn(move || {
-            let result = worker.run(pid, None, |chunk| {
-                let mono = downmix_to_mono(&chunk.samples, CAPTURE_CHANNELS as usize);
-                let resampled = decimator.process(&mono);
-                if !resampled.is_empty() {
-                    let _ = chunks.send(Ok(resampled));
-                }
-            });
-            if let Err(e) = result {
-                let _ = chunks.send(Err(e.to_string()));
-            }
-        });
-        Ok(stopper(move || capture.stop(), thread))
+        Ok(spawn(
+            chunks,
+            move || capture.stop(),
+            move |chunks: &ChunkSender| {
+                worker.run(pid, None, |chunk| {
+                    let mono = downmix_to_mono(&chunk.samples, CAPTURE_CHANNELS as usize);
+                    let resampled = decimator.process(&mono);
+                    if !resampled.is_empty() {
+                        let _ = chunks.send(Ok(resampled));
+                    }
+                })
+            },
+        ))
     }))
 }
 
@@ -74,27 +74,45 @@ pub fn whole_device() -> ThreadedSource {
     ThreadedSource::new(Box::new(|chunks: ChunkSender| {
         let capture = DeviceLoopbackCapture::new();
         let worker = capture.clone();
-        let thread = std::thread::spawn(move || {
-            let result = worker.run(None, |chunk| {
-                let _ = chunks.send(Ok(chunk.samples));
-            });
-            if let Err(e) = result {
-                let _ = chunks.send(Err(e.to_string()));
-            }
-        });
-        Ok(stopper(move || capture.stop(), thread))
+        Ok(spawn(
+            chunks,
+            move || capture.stop(),
+            move |chunks: &ChunkSender| {
+                worker.run(None, |chunk| {
+                    let _ = chunks.send(Ok(chunk.samples));
+                })
+            },
+        ))
     }))
 }
 
-/// Signal the capture, then wait for its thread. Joining matters: the WASAPI
-/// client is released on the way out, and a session started immediately after
-/// this one would otherwise be opening a device the last one still holds.
-fn stopper(
-    signal: impl FnOnce() + Send + 'static,
-    thread: JoinHandle<()>,
-) -> Box<dyn FnOnce() + Send> {
-    Box::new(move || {
-        signal();
-        let _ = thread.join();
+/// Run one capture on its own thread and return the stopper the session drives
+/// it with.
+///
+/// The stopper waits for the thread to unwind, because the WASAPI client is
+/// released on the way out and a session started straight after this one would
+/// otherwise open a device the last one still holds. It waits only up to the
+/// deadline, though: the transcript is written after this returns, and a driver
+/// that will not let go must not be able to hold a finished meeting hostage.
+fn spawn(
+    chunks: ChunkSender,
+    signal_stop: impl FnOnce() + Send + 'static,
+    run: impl FnOnce(&ChunkSender) -> Result<(), Error> + Send + 'static,
+) -> Stopper {
+    // `JoinHandle` has no timed join, so the thread's end is observed instead
+    // through this channel: it drops when the thread unwinds, for any reason.
+    let (alive, unwound) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let _alive = alive;
+        if let Err(e) = run(&chunks) {
+            let _ = chunks.send(Err(e.to_string()));
+        }
+    });
+
+    Box::new(move |deadline: Duration| {
+        signal_stop();
+        // Disconnected means unwound. A timeout leaves the thread running,
+        // which is the lesser evil.
+        let _ = unwound.recv_timeout(deadline);
     })
 }
