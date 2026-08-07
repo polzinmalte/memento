@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the one window is allowed to call. memento's own commands (list_sources, list_models, start_session, …) are not part of the ACL, but the core event plugin is: without core:default the transcript listener is denied and no line ever reaches the UI.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -336,4 +336,49 @@ mod tests {
         let dir = default_output_dir();
         assert!(dir.ends_with("Documents/memento") || dir.ends_with("Documents\\memento"));
     }
+
+    fn config() -> serde_json::Value {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.conf.json");
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// `ui/index.html` is served as-is, with no bundler and no npm import, so it
+    /// reaches the commands through `window.__TAURI__`. Tauri injects that
+    /// object only when this flag is set. Without it the very first line of the
+    /// script throws, `init()` never runs, and the app opens with an empty
+    /// source dropdown and an empty model dropdown — and no error, because the
+    /// handler that would have shown one died with the rest of the module.
+    #[test]
+    fn the_global_tauri_api_the_ui_depends_on_is_enabled() {
+        assert_eq!(config()["app"]["withGlobalTauri"], serde_json::json!(true));
+    }
+
+    /// The transcript arrives as `session` events, and `listen` is a *core
+    /// plugin* command — unlike memento's own commands it is refused unless a
+    /// capability grants it. With no `capabilities/` directory at all the ACL is
+    /// empty and every line is silently dropped.
+    #[test]
+    fn the_window_is_granted_the_core_permissions_the_event_listener_needs() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/capabilities/default.json");
+        let capability: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+
+        let permissions = capability["permissions"].as_array().unwrap();
+        assert!(
+            permissions.iter().any(|p| p == "core:default"),
+            "{permissions:?}"
+        );
+
+        // The capability applies per window label, and the window in
+        // tauri.conf.json has no explicit label, so it gets Tauri's default.
+        let label = config()["app"]["windows"][0]["label"]
+            .as_str()
+            .unwrap_or("main")
+            .to_string();
+        let windows = capability["windows"].as_array().unwrap();
+        assert!(
+            windows.iter().any(|w| w == &label),
+            "{windows:?} must cover {label:?}"
+        );
+    }
 }
