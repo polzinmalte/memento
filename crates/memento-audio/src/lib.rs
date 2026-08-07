@@ -8,12 +8,16 @@
 pub mod resample;
 
 #[cfg(windows)]
+pub mod device_loopback;
+#[cfg(windows)]
 pub mod mic;
 #[cfg(windows)]
 pub mod process_loopback;
 #[cfg(windows)]
 pub mod sessions;
 
+#[cfg(windows)]
+pub use device_loopback::DeviceLoopbackCapture;
 #[cfg(windows)]
 pub use mic::MicCapture;
 #[cfg(windows)]

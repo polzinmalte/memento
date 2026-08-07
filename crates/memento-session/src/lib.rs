@@ -12,6 +12,8 @@
 
 pub mod clock;
 pub mod source;
+#[cfg(windows)]
+pub mod windows_source;
 
 use memento_asr::{WhisperTranscriber, download, models as asr_models};
 use memento_core::{
@@ -23,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub use source::{CaptureSource, FileSource, Lane};
+pub use source::{CaptureSource, FileSource, Lane, ThreadedSource, WarningSink};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 

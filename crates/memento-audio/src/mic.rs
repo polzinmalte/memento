@@ -84,6 +84,7 @@ impl MicCapture {
             let source_rate = format.nSamplesPerSec;
             let is_float =
                 tag == WAVE_FORMAT_FLOAT || (tag == WAVE_FORMAT_EXTENSIBLE && bits == 32);
+            let is_pcm16 = tag == WAVE_FORMAT_PCM as u16 && bits == 16;
 
             let init = client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -96,7 +97,7 @@ impl MicCapture {
             CoTaskMemFree(Some(format_ptr.cast()));
             init?;
 
-            if !is_float && !(tag == WAVE_FORMAT_PCM as u16 && bits == 16) {
+            if !(is_float || is_pcm16) {
                 return Err(
                     format!("unsupported microphone format: tag {tag} at {bits} bits").into(),
                 );

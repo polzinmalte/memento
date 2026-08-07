@@ -7,6 +7,9 @@
 
 use memento_core::audio_math;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -30,6 +33,145 @@ pub trait CaptureSource: Send {
     fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, Error>;
 
     fn stop(&mut self);
+}
+
+/// Chunks on their way from a capture thread to the session, 16 kHz mono. An
+/// `Err` is the capture giving up: whatever it says is the last thing the lane
+/// has to say.
+pub type ChunkSender = Sender<Result<Vec<f32>, String>>;
+
+/// Ends a running capture and waits for its thread.
+type Stopper = Box<dyn FnOnce() + Send>;
+
+/// Starts a capture, handing it the sender to feed. Called once, by
+/// [`ThreadedSource::start`].
+type Starter = Box<dyn FnOnce(ChunkSender) -> Result<Stopper, Error> + Send>;
+
+/// Told about a lane that died mid-session, so the UI can say so.
+pub type WarningSink = Arc<dyn Fn(String) + Send + Sync>;
+
+/// How long [`ThreadedSource::start`] waits for the first buffer before
+/// deciding the lane cannot be placed on the shared timeline.
+const ANCHOR_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A [`CaptureSource`] fed by a capture thread.
+///
+/// The Windows captures are blocking callback loops — you hand them a closure
+/// and they run until stopped — while the session pulls one chunk at a time.
+/// This is the adapter between the two, and it is also where a lane's anchor is
+/// measured: the clock is read when the first buffer actually arrives, not when
+/// `start` was called, because the two lanes' devices take different amounts of
+/// time to produce their first audio and that difference is exactly what the
+/// merge has to correct for.
+pub struct ThreadedSource {
+    starter: Option<Starter>,
+    stopper: Option<Stopper>,
+    chunks: Option<Receiver<Result<Vec<f32>, String>>>,
+    /// The buffer `start` took off the channel to measure the anchor with.
+    pending: Option<Vec<f32>>,
+    warning: Option<WarningSink>,
+    anchor_timeout: Duration,
+}
+
+impl ThreadedSource {
+    pub fn new(starter: Starter) -> Self {
+        Self {
+            starter: Some(starter),
+            stopper: None,
+            chunks: None,
+            pending: None,
+            warning: None,
+            anchor_timeout: ANCHOR_TIMEOUT,
+        }
+    }
+
+    /// Where to report a capture that dies after the meeting has begun.
+    pub fn on_warning(mut self, sink: WarningSink) -> Self {
+        self.warning = Some(sink);
+        self
+    }
+
+    /// Shortens the wait for the first buffer. For tests, which must not sit
+    /// out the real timeout.
+    pub fn with_anchor_timeout(mut self, timeout: Duration) -> Self {
+        self.anchor_timeout = timeout;
+        self
+    }
+}
+
+impl CaptureSource for ThreadedSource {
+    fn start(&mut self) -> Result<Option<f64>, Error> {
+        let starter = self
+            .starter
+            .take()
+            .ok_or_else(|| -> Error { "this capture has already been started".into() })?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let stopper = starter(sender)?;
+
+        let anchor = match receiver.recv_timeout(self.anchor_timeout) {
+            Ok(Ok(first)) => {
+                self.pending = Some(first);
+                Some(now_seconds())
+            }
+            // A device that cannot open at all: nothing has been recorded yet,
+            // so this is worth failing the session for — the user needs to know
+            // why Start did nothing.
+            Ok(Err(e)) => {
+                stopper();
+                return Err(e.into());
+            }
+            // Silence so far, or a lane that finished immediately. Neither is an
+            // error: the session runs on, unaligned, which `LaneAnchors` treats
+            // as the honest answer rather than guessing an offset.
+            Err(_) => None,
+        };
+
+        self.stopper = Some(stopper);
+        self.chunks = Some(receiver);
+        Ok(anchor)
+    }
+
+    fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, Error> {
+        if let Some(first) = self.pending.take() {
+            return Ok(Some(first));
+        }
+        let Some(chunks) = &self.chunks else {
+            return Ok(None);
+        };
+        match chunks.recv() {
+            Ok(Ok(samples)) => Ok(Some(samples)),
+            // The lane ends, the session does not. A microphone unplugged forty
+            // minutes in must not cost the forty minutes.
+            Ok(Err(e)) => {
+                if let Some(warn) = &self.warning {
+                    warn(e);
+                }
+                Ok(None)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Some(stopper) = self.stopper.take() {
+            stopper();
+        }
+        self.chunks = None;
+        // Including the buffer `start` was holding: a stopped source is
+        // finished, and one that still answers with audio afterwards is a trap
+        // for anyone who assumes `None` means done.
+        self.pending = None;
+    }
+}
+
+/// Seconds since the Unix epoch. Only differences between the two lanes are
+/// used, so the epoch is arbitrary — but it has to be the same one for both,
+/// which rules out `Instant`.
+fn now_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// Replays a WAV. Used for testing the session end to end, and for developing
@@ -138,6 +280,105 @@ mod tests {
         while source.next_chunk().unwrap().is_some() {}
         source.start().unwrap();
         assert!(source.next_chunk().unwrap().is_some());
+    }
+
+    /// A stand-in for a Windows capture: sends what it is told to, then ends.
+    /// `stopped` records that the source really did shut the producer down.
+    fn producer(
+        script: Vec<Result<Vec<f32>, String>>,
+        stopped: Arc<std::sync::atomic::AtomicBool>,
+    ) -> ThreadedSource {
+        ThreadedSource::new(Box::new(move |tx: ChunkSender| {
+            let thread = std::thread::spawn(move || {
+                for item in script {
+                    if tx.send(item).is_err() {
+                        break;
+                    }
+                }
+            });
+            Ok(Box::new(move || {
+                stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+                let _ = thread.join();
+            }) as Box<dyn FnOnce() + Send>)
+        }))
+        .with_anchor_timeout(Duration::from_millis(250))
+    }
+
+    fn flag() -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::new(std::sync::atomic::AtomicBool::new(false))
+    }
+
+    #[test]
+    fn every_captured_buffer_reaches_the_session_in_order() {
+        // Including the first one, which `start` takes off the channel to read
+        // the clock and must hand back rather than swallow.
+        let script = vec![Ok(vec![0.1]), Ok(vec![0.2]), Ok(vec![0.3])];
+        let mut source = producer(script, flag());
+        source.start().unwrap();
+
+        let mut got = Vec::new();
+        while let Some(chunk) = source.next_chunk().unwrap() {
+            got.extend(chunk);
+        }
+        assert_eq!(got, vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn the_anchor_is_the_clock_when_the_first_buffer_arrived() {
+        let mut source = producer(vec![Ok(vec![0.1])], flag());
+        let anchor = source.start().unwrap().expect("a lane with audio anchors");
+        assert!((anchor - now_seconds()).abs() < 5.0, "{anchor}");
+    }
+
+    /// Nothing has been recorded yet, so a device that will not open is worth
+    /// failing on — otherwise Start appears to work and records silence.
+    #[test]
+    fn a_capture_that_cannot_start_fails_the_session_and_stops_the_producer() {
+        let stopped = flag();
+        let mut source = producer(vec![Err("no microphone".into())], Arc::clone(&stopped));
+        let err = source.start().unwrap_err().to_string();
+        assert!(err.contains("no microphone"), "{err}");
+        assert!(stopped.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// The opposite case: the device opened but is silent so far. That is an
+    /// ordinary meeting that has not started talking yet, not a failure.
+    #[test]
+    fn a_silent_lane_still_starts_just_without_an_anchor() {
+        let mut source = producer(Vec::new(), flag());
+        assert_eq!(source.start().unwrap(), None);
+    }
+
+    /// The regression this whole indirection exists to prevent: losing a
+    /// recorded meeting because a device disappeared during it.
+    #[test]
+    fn a_device_lost_mid_meeting_ends_the_lane_not_the_session() {
+        let warnings: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = Arc::clone(&warnings);
+        let script = vec![Ok(vec![0.1]), Ok(vec![0.2]), Err("device removed".into())];
+        let mut source = producer(script, flag())
+            .on_warning(Arc::new(move |w| collected.lock().unwrap().push(w)));
+        source.start().unwrap();
+
+        assert_eq!(source.next_chunk().unwrap(), Some(vec![0.1]));
+        assert_eq!(source.next_chunk().unwrap(), Some(vec![0.2]));
+        assert_eq!(source.next_chunk().unwrap(), None, "the lane ends");
+        assert_eq!(warnings.lock().unwrap().as_slice(), ["device removed"]);
+    }
+
+    #[test]
+    fn stopping_shuts_the_producer_down() {
+        let stopped = flag();
+        let mut source = producer(vec![Ok(vec![0.1])], Arc::clone(&stopped));
+        source.start().unwrap();
+        source.stop();
+        assert!(stopped.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(
+            source.next_chunk().unwrap(),
+            None,
+            "a stopped source is finished, buffered chunk and all"
+        );
     }
 
     #[test]

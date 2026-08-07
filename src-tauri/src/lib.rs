@@ -137,11 +137,21 @@ fn start_session(
         let _ = emitter.emit("session", describe(&event));
     });
 
+    // A lane that dies mid-meeting ends that lane rather than the session, so
+    // this warning is the only trace the user would otherwise get.
+    let warner = app.clone();
+    let warn: memento_session::WarningSink = Arc::new(move |message: String| {
+        let _ = warner.emit(
+            "session",
+            serde_json::json!({ "kind": "warning", "message": message }),
+        );
+    });
+
     let app_for_thread = app.clone();
     let pid = request.pid;
     // Capture blocks; the UI thread must stay free for the stop button.
     std::thread::spawn(move || {
-        let (mic, system) = match build_sources(pid) {
+        let (mic, system) = match build_sources(pid, warn) {
             Ok(pair) => pair,
             Err(e) => {
                 let _ = app_for_thread.emit(
@@ -200,17 +210,26 @@ fn clear_running(app: &AppHandle) {
 }
 
 #[cfg(windows)]
-fn build_sources(pid: Option<u32>) -> Result<LanePair, String> {
-    let _ = pid;
-    // The Windows capture sources are written but not yet wired through the
-    // CaptureSource trait; that adapter is the next step and is deliberately not
-    // faked here, because a UI that silently records nothing is worse than one
-    // that refuses.
-    Err("Windows capture is not wired to the session yet".into())
+fn build_sources(pid: Option<u32>, warn: memento_session::WarningSink) -> Result<LanePair, String> {
+    use memento_session::windows_source;
+
+    let mic = windows_source::microphone().on_warning(warn.clone());
+    // No pid means the user picked "everything playing on this device", which
+    // is the only thing on offer before the meeting app makes a sound.
+    let system = match pid {
+        Some(pid) => windows_source::application(pid),
+        None => windows_source::whole_device(),
+    }
+    .on_warning(warn);
+
+    Ok((Box::new(mic), Box::new(system)))
 }
 
 #[cfg(not(windows))]
-fn build_sources(_pid: Option<u32>) -> Result<LanePair, String> {
+fn build_sources(
+    _pid: Option<u32>,
+    _warn: memento_session::WarningSink,
+) -> Result<LanePair, String> {
     Err("audio capture requires Windows; this build can only replay files".into())
 }
 
